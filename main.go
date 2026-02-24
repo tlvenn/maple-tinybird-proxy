@@ -1,6 +1,7 @@
 package main
 
 import (
+	"crypto/subtle"
 	"encoding/json"
 	"fmt"
 	"log"
@@ -54,23 +55,25 @@ func main() {
 		time.Sleep(2 * time.Second)
 	}
 
-	mux := http.NewServeMux()
+	mux := buildMux(ch, cfg.AuthToken)
 
-	auth := authMiddleware(cfg.AuthToken)
+	log.Printf("maple-tinybird-proxy listening on %s (db=%s)", cfg.ListenAddr, cfg.ClickHouseDB)
+	log.Printf("registered %d pipes", len(pipeRegistry))
+	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
+}
+
+// ─── Mux Builder ─────────────────────────────────────────────────────────────
+
+func buildMux(ch *ClickHouseClient, authToken string) *http.ServeMux {
+	mux := http.NewServeMux()
+	auth := authMiddleware(authToken)
 
 	// ── Tinybird-compatible endpoints ────────────────────────────────────────
 	mux.HandleFunc("POST /v0/events", auth(handleIngest(ch)))
-	mux.HandleFunc("GET /v0/pipes/{name}.json", auth(handlePipe(ch)))
+	mux.HandleFunc("GET /v0/pipes/{name}", auth(handlePipe(ch)))
 
 	// ── Admin / utility ──────────────────────────────────────────────────────
-	mux.HandleFunc("GET /health", func(w http.ResponseWriter, r *http.Request) {
-		if err := ch.Ping(); err != nil {
-			http.Error(w, `{"status":"unhealthy","error":"`+err.Error()+`"}`, 503)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"status":"ok"}`)
-	})
+	mux.HandleFunc("GET /health", handleHealth(ch))
 
 	mux.HandleFunc("POST /admin/schema", auth(func(w http.ResponseWriter, r *http.Request) {
 		applySchema(ch, w)
@@ -85,9 +88,23 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{"pipes": names, "count": len(names)})
 	}))
 
-	log.Printf("maple-tinybird-proxy listening on %s (db=%s)", cfg.ListenAddr, cfg.ClickHouseDB)
-	log.Printf("registered %d pipes", len(pipeRegistry))
-	log.Fatal(http.ListenAndServe(cfg.ListenAddr, mux))
+	return mux
+}
+
+// ─── Health ──────────────────────────────────────────────────────────────────
+
+func handleHealth(ch *ClickHouseClient) http.HandlerFunc {
+	return func(w http.ResponseWriter, r *http.Request) {
+		if err := ch.Ping(); err != nil {
+			log.Printf("health check failed: %v", err)
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(http.StatusServiceUnavailable)
+			fmt.Fprint(w, `{"status":"unhealthy"}`)
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		fmt.Fprint(w, `{"status":"ok"}`)
+	}
 }
 
 // ─── Auth Middleware ──────────────────────────────────────────────────────────
@@ -99,7 +116,9 @@ func authMiddleware(token string) func(http.HandlerFunc) http.HandlerFunc {
 				next(w, r)
 				return
 			}
-			if r.Header.Get("Authorization") != "Bearer "+token {
+			expected := "Bearer " + token
+			actual := r.Header.Get("Authorization")
+			if subtle.ConstantTimeCompare([]byte(expected), []byte(actual)) != 1 {
 				writeJSONError(w, http.StatusUnauthorized, "unauthorized")
 				return
 			}

@@ -3,6 +3,7 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 )
@@ -71,11 +72,11 @@ func buildQuery(pipe Pipe, params Params) (string, error) {
 
 func handlePipe(ch *ClickHouseClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
-		name := r.PathValue("name")
+		name := strings.TrimSuffix(r.PathValue("name"), ".json")
 
 		pipe, ok := pipeRegistry[name]
 		if !ok {
-			writeJSONError(w, http.StatusNotFound, fmt.Sprintf("pipe not found: %s", name))
+			writeJSONError(w, http.StatusNotFound, "pipe not found")
 			return
 		}
 
@@ -88,13 +89,15 @@ func handlePipe(ch *ClickHouseClient) http.HandlerFunc {
 
 		sql, err := buildQuery(pipe, params)
 		if err != nil {
-			writeJSONError(w, http.StatusBadRequest, err.Error())
+			log.Printf("ERROR pipe %q build: %v", name, err)
+			writeJSONError(w, http.StatusBadRequest, "failed to build query")
 			return
 		}
 
 		result, err := ch.Query(sql)
 		if err != nil {
-			writeJSONError(w, http.StatusInternalServerError, err.Error())
+			log.Printf("ERROR pipe %q query: %v", name, err)
+			writeJSONError(w, http.StatusInternalServerError, "query execution failed")
 			return
 		}
 

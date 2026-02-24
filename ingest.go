@@ -37,6 +37,7 @@ type batchBuffer struct {
 	table   string
 	ch      *ClickHouseClient
 	flushCh chan struct{}
+	done    chan struct{}
 }
 
 var (
@@ -61,6 +62,7 @@ func getOrCreateBuffer(table string, ch *ClickHouseClient) *batchBuffer {
 		table:   table,
 		ch:      ch,
 		flushCh: make(chan struct{}, 1),
+		done:    make(chan struct{}),
 	}
 	go b.flushLoop()
 	buffers[table] = b
@@ -84,17 +86,33 @@ func (b *batchBuffer) add(rows []json.RawMessage) {
 	}
 }
 
+func (b *batchBuffer) stop() {
+	close(b.done)
+}
+
 func (b *batchBuffer) flushLoop() {
 	ticker := time.NewTicker(batchFlushPeriod)
 	defer ticker.Stop()
 	for {
 		select {
+		case <-b.done:
+			b.flush()
+			return
 		case <-ticker.C:
 			b.flush()
 		case <-b.flushCh:
 			b.flush()
 		}
 	}
+}
+
+func resetBuffers() {
+	buffersMu.Lock()
+	defer buffersMu.Unlock()
+	for _, b := range buffers {
+		b.stop()
+	}
+	buffers = map[string]*batchBuffer{}
 }
 
 func (b *batchBuffer) flush() {
@@ -123,6 +141,8 @@ func (b *batchBuffer) flush() {
 
 func handleIngest(ch *ClickHouseClient) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, 64*1024*1024) // 64 MB max
+
 		dsName := r.URL.Query().Get("name")
 		if dsName == "" {
 			writeJSONError(w, http.StatusBadRequest, "missing 'name' query parameter")
@@ -171,43 +191,6 @@ func handleIngest(ch *ClickHouseClient) http.HandlerFunc {
 
 		w.Header().Set("Content-Type", "application/json")
 		fmt.Fprintf(w, `{"successful_rows":%d,"quarantined_rows":0}`, len(rows))
-	}
-}
-
-// ─── Schema init endpoint ──────────────────────────────────────────────────────
-
-// handleApplySchema runs the schema SQL against ClickHouse.
-func handleApplySchema(ch *ClickHouseClient, schemaSQL string) http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		stmts := splitStatements(schemaSQL)
-		var errs []string
-		for _, stmt := range stmts {
-			stmt = strings.TrimSpace(stmt)
-			if stmt == "" {
-				continue
-			}
-			if _, err := ch.Query(stmt); err != nil {
-				// ClickHouse returns errors for DDL via Query endpoint differently,
-				// use the raw exec path
-				if err2 := ch.Insert("_dummy_", nil); err2 != nil {
-					// fallthrough
-				}
-				// Best effort DDL: exec via query endpoint directly
-				req := stmt + "\nFORMAT JSON"
-				if _, e := ch.execQuery(req); e != nil {
-					errs = append(errs, e.Error())
-				}
-			}
-		}
-		if len(errs) > 0 {
-			w.Header().Set("Content-Type", "application/json")
-			w.WriteHeader(http.StatusInternalServerError)
-			enc, _ := json.Marshal(map[string]interface{}{"errors": errs})
-			w.Write(enc)
-			return
-		}
-		w.Header().Set("Content-Type", "application/json")
-		fmt.Fprint(w, `{"ok":true}`)
 	}
 }
 

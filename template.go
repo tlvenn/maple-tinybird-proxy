@@ -385,9 +385,9 @@ func evalExpr(expr string, params Params) (string, error) {
 			if defaultVal == "" {
 				return "'1970-01-01 00:00:00'", nil
 			}
-			return "'" + defaultVal + "'", nil
+			return escapeString(defaultVal), nil
 		}
-		return "'" + normalizeDateTime(val) + "'", nil
+		return escapeString(normalizeDateTime(val)), nil
 
 	case "Boolean", "Bool":
 		if val == "true" || val == "1" {
