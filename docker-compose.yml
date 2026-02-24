@@ -1,0 +1,41 @@
+version: "3.9"
+
+services:
+  clickhouse:
+    image: clickhouse/clickhouse-server:26-alpine
+    ports:
+      - "8123:8123"   # HTTP API
+      - "9000:9000"   # Native protocol
+    volumes:
+      - ch_data:/var/lib/clickhouse
+    environment:
+      CLICKHOUSE_DB: maple
+      CLICKHOUSE_USER: default
+      CLICKHOUSE_DEFAULT_ACCESS_MANAGEMENT: 1
+    ulimits:
+      nofile:
+        soft: 262144
+        hard: 262144
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:8123/ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  proxy:
+    build: .
+    ports:
+      - "7181:7181"
+    environment:
+      LISTEN_ADDR: ":7181"
+      CLICKHOUSE_URL: "http://clickhouse:8123"
+      CLICKHOUSE_DB: "maple"
+      CLICKHOUSE_USER: "default"
+      CLICKHOUSE_PASSWORD: ""
+      AUTH_TOKEN: ""        # set to require Bearer auth
+    depends_on:
+      clickhouse:
+        condition: service_healthy
+
+volumes:
+  ch_data:
